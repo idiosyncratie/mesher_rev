@@ -1,0 +1,45 @@
+2014 summer - changelog
+Used Ubuntu in VirtualBox 
+Recompilation of mesher_red.exe will allow it to accept files larger than its current maximum capacity
+
+run line:
+g++ rawField.cpp subdivision.cpp quadtree.cpp kdtree.cpp mesher_red.cpp -o output
+
+g++ -Wall rawField.cpp subdivision.cpp quadtree.cpp kdtree.cpp mesher_red.cpp -o output
+
+add "#include <string.h>" to all files with strcmp/strcpy errors
+temporarily changed stricmp to strcmp
+	both compare strings (perform the same function), but
+	stricmp compares alphabetic characters without regard to case. "A" and "a" are considered the same by stricmp, but not by strcmp
+add "#include <stdlib.h>" for malloc error
+change zeqnodat to zeqnodata (variable)
+
+Error: 
+	undefined references when run
+	mesher_red.cpp cannot find functions for subdivision, quadtree etc. in other files 
+	included all the files in run line. 
+option: 
+	When there are multiple files, the function needs to be defined inside your file. Tell the linker that there's another file that this function is contained in. Link it, the main will find the function
+	extern command for C++ 
+	ex: 
+	--includes.h
+	extern int count
+
+	--main.cpp
+	#include "includes.h"
+	int count = 4;
+
+	--other.cpp
+	#include "includes.h"
+	cout<<count; // will ouput 4
+
+fix sort library problems (library error)
+	 (add "#include <vector.h>" maybe? does not fix problem) 
+	 added #include <algorithms.h>
+	 Library may not exist / library issues
+
+should recompile into .o file 
+same performance can be done with MinGW-W64 to recompile code into .exe file (windows executable software) or
+.o file can be converted to .exe file given that it fulfills a number of requirements.
+
+

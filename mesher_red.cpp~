@@ -1,0 +1,598 @@
+// Includes
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <string>
+#include <ctime>
+#include <limits>
+#include "vicDefs.h"
+#include "quadtree.h"
+#include "subdivision.h"
+#include "kdtree.h"
+#include <cstring>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <stropts.h>
+#define stricmp strcasecmp
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+//Don't tell me I'm using unsafe c functions
+#pragma warning(disable : 4996)
+
+extern void outputUV();
+
+using namespace std;
+
+// Function Declarations
+void WriteError(char *, Subdivision * mesh);
+
+void wait ( int seconds )
+{
+	clock_t endwait;
+	endwait = clock () + seconds * CLOCKS_PER_SEC ;
+	while (clock() < endwait) {}
+}
+
+void printUsage() {
+	cout << "Usage: mesher_red inputfile input-type outputfile reductiontype scale numpoints\n";
+	cout << "Usage: mesher_red -all inputfile input-type outputfile scale\n";
+	cout << "See README for a list of options\n";
+}
+
+int main(int argc, char ** argv) {
+	clock_t start = clock();
+	//The varibales which are changed by command line options
+	//Defaults are here if they exist
+
+	//The type of the input file
+	char intype[10];
+	//The type of insertion to use
+	char outtype[10];
+	//The input filename
+	char infile[1000];
+	//The output filename
+	char outfile[1000];
+	//The file name of the hole boundary
+	char holeBoundary[1000] = "";
+	//The filename of the importance map
+	char importanceMap[1000] = "";
+	//The input type of the importance map
+	char impInType[10];
+	//The number of points to insert
+	int numPoints;
+	//The amount to scale the x and y coordinates by
+	double scale = 1;
+	//Should we insert all edge points of a DEM?
+	bool fixEdge = false;
+	//Shoule we write out a UV map
+	bool writeUV = false;
+	//The number of iterations of smoothing to put the mesh through
+	int smoothIters = 0;
+	//The number of iterations of smoothing to use when smoothing points which
+	//we have made up
+	int smoothNoDataIters = 10;
+	//Should we be treating a certain value as nodata
+	bool findnodata = false;
+	//Should we preserve the box we made the mesh in?
+	bool preserveBox = true;
+	//Should we force the corners to be removed?
+	bool forceRemoveCorners = false;
+	//Do we expect sequencial access to the input field
+	bool seqAccess;
+	//Should we output the error map to a tif file
+	bool outputError = false;
+	//Specific value assigned to no-data
+	double replaceVal = 0.0;
+	//What value should we replace nodata with(infinity means leave it out)
+	double replaceWith = numeric_limits<double>::infinity();
+	//the amount of memory to use to load the image
+	double imageMem = 0.0;
+	//The number of iterations to use when fixing spikes
+	int spikeIters = 0;
+	//The maximum dihedral angle allowed for a spike to be left alone
+	double maxAngle = 90;
+	//The maximum dihedral angle allowed for a single face to be left alone
+	double absoluteMaxAngle = 90;
+	//The maximum ratio of circumcircle to incircle radius allowed for the output triangles
+	double maxRho = 10.0;
+	//The number of points which have been inserted
+	int pointsInserted = 0;
+	//Should we be agressive about fixing slivers
+	bool forceSliverFix = false;
+	//Should we only do the preliminary smooth on points outside the mesh
+	bool prelimSmoothOnly = false;
+	//Should we output a fake surface to indicate which data points we have made up
+	bool fakeSurface = true;
+	//The point in the arguments where the optional arguments start
+	int optionsStart;
+
+	//Make sure the input has the correct form
+	if (argc < 7) {
+		if (argc < 6 || stricmp(argv[1], "-all")) {
+			printUsage();
+			exit(1);
+		}
+	}
+
+	if (!stricmp(argv[1], "-all")) {
+		strncpy(infile, argv[2], 1000);
+		strncpy(intype, argv[3], 10);
+		strncpy(outfile, argv[4], 1000);
+		strncpy(outtype, "all", 10);
+		scale = atof(argv[5]);
+		numPoints = 0;
+		optionsStart = 6;
+	} else {
+		strncpy(infile, argv[1], 1000);
+		strncpy(intype, argv[2], 10);
+		strncpy(outfile, argv[3], 1000);
+		strncpy(outtype, argv[4], 10);
+		scale = atof(argv[5]);
+		numPoints = atoi(argv[6]);
+		optionsStart = 7;
+	}
+
+	for (int i = optionsStart; i < argc; i++) {
+		if (!stricmp(argv[i], "-fixed")) {
+			fixEdge = true;
+		} else if (!stricmp(argv[i], "-smooth")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -smooth\n";
+				exit(1);
+			}
+
+			smoothIters = atoi(argv[++i]);
+
+			if (smoothIters <= 0) {
+				smoothIters = 0;
+			}
+
+		} else if (!stricmp(argv[i], "-smoothnodata") || !stricmp(argv[i], "-smoothvoid")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -smoothnodata\n";
+				exit(1);
+			}
+
+			smoothNoDataIters = atoi(argv[++i]);
+
+			if (smoothNoDataIters <= 0) {
+				smoothNoDataIters = 0;
+			}				
+		} else if (!stricmp(argv[i], "-prelimsmoothonly")) {
+			bool prelimsmoothonly = true;
+		} else if (!stricmp(argv[i], "-fixSpikes")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -fixSpikes\n";
+				exit(1);
+			}
+
+			maxAngle = atof(argv[++i]);
+		} else if (!stricmp(argv[i], "-fixmultispikes")) {
+			if (i + 2 >= argc) {
+				cout << "Illegal use of -fixmultispikes\n";
+				exit(1);
+			}
+
+			maxAngle = atof(argv[++i]);
+			absoluteMaxAngle = atof(argv[++i]);
+		} else if (!stricmp(argv[i], "-0=nodata") ||
+			!stricmp(argv[i], "-0eqnodata") ||
+			!stricmp(argv[i], "-zeroeqnodata") ||
+			!stricmp(argv[i], "-zero=nodata") ||
+			!stricmp(argv[i], "-zeqnodata") ||
+			!stricmp(argv[i], "-z=nodata")) {
+
+				findnodata = true;
+		} else if (!stricmp(argv[i], "-setnodata")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -setnodata\n";
+				exit(1);
+			}
+
+			findnodata = true;
+			replaceVal = atof(argv[++i]);
+		} else if (!stricmp(argv[i], "-replacevoid") || !stricmp(argv[i], "-replacenodata")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -replacevoid\n";
+				exit(1);
+			}
+			replaceWith = atof(argv[++i]);
+			//If we are told to set points outside the mesh to a specific value,
+			//don't ruin that by smoothing
+			smoothNoDataIters = 0;
+		} else if (!stricmp(argv[i], "-maximagemem")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -maximagemem\n";
+				exit(1);
+			}
+			imageMem = atof(argv[++i]) * (1<<20);
+		} else if (!stricmp(argv[i], "-uv")) {
+			writeUV = true;
+		} else if (!stricmp(argv[i], "-removebox")) {
+			preserveBox = false;
+		} else if (!stricmp (argv[i], "-removeCorners")) {
+			preserveBox = false;
+			forceRemoveCorners = true;
+		} else if (!stricmp(argv[i], "-importanceMap")) {
+			if (i + 2 >= argc) {
+				cout << "Illegal use of -importanceMap\n";
+				exit(1);
+			}
+
+			strcpy(importanceMap, argv[++i]);
+			strcpy(impInType, argv[++i]);
+		} else if (!stricmp(argv[i], "-errorMap")) {
+			outputError = true;
+		} else if (!stricmp(argv[i], "-fixslivers")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -fixslivers\n";
+				exit(1);
+			}
+			maxRho = atof(argv[++i]);
+			if (maxRho <= 0) {
+				maxRho = 0;
+			} else if (maxRho < 3) {
+				cout << "given unreasonable value for maxRho\n";
+				cout << "keep in mind an equilateral triangle has a rho of 2\n";
+				cout << "minimum allowable value of rho is 3\n";
+				exit(1);
+			}
+		} else if (!stricmp(argv[i], "-noclean")) {
+			maxRho = 0;
+			smoothNoDataIters = 0;
+		} else if (!stricmp(argv[i], "-holeBoundary")) {
+			if (i + 1 >= argc) {
+				cout << "Illegal use of -holeBoundary\n";
+				exit(1);
+			}
+			strncpy(holeBoundary, argv[++i], 1000);
+		} else if (!stricmp(argv[i], "-forceSliverFix")) {
+			forceSliverFix = true;
+		} else if (!stricmp(argv[i], "-nofakesurface")) {
+			fakeSurface = false;
+		} else {
+			cout << "Unrecognized option: " << argv[i] << "\n";
+			exit(1);
+		}
+	}
+
+	RawField::intype_t rawintype;
+	Subdivision::inserttype_t inserttype;
+
+	//Set the input image type
+	if (!(stricmp(intype, "TIF") && stricmp(intype, "TIFF"))) {
+		rawintype = RawField::GEOTIFF;
+	} else if (!(stricmp(intype, "VICAR") && stricmp(intype, "VIC"))) {
+		rawintype = RawField::VICAR;
+	} else if (!(stricmp(intype, "CUBE") && stricmp(intype, "cub"))) {
+		rawintype = RawField::CUBE;
+	}else if (!(stricmp(intype, "object") && stricmp(intype, "obj"))) {
+		rawintype = RawField::OBJ;
+	} else {
+		cout << "Unrecognized input type: " << intype << "\n";
+		exit(1);
+	}
+
+	//Set the insertion type and the raw field access type based on outtype
+	if (!(stricmp(outtype, "cnt"))) {
+		inserttype = Subdivision::CICRCUMCENTER;
+		seqAccess = false;
+	} else if (!(stricmp(outtype, "cnv"))) {
+		inserttype = Subdivision::CICRCUMCENTER_VOL;
+		seqAccess = false;
+	} else if (!(stricmp(outtype, "max"))) {
+		inserttype = Subdivision::MAX_ERR;
+		seqAccess = true;
+	} else if (!(stricmp(outtype, "mxv") && stricmp(outtype, "maxvol") && stricmp(outtype, "maxv"))) {
+		inserttype = Subdivision::MAX_ERR_VOL;
+		seqAccess = true;
+	} else if (!(stricmp(outtype, "all"))) {
+		inserttype = Subdivision::ALL;
+		seqAccess = true;
+	} else {
+		cout << "Unrecognized output type: " << outtype << "\n";
+		exit(1);
+	}
+
+	//The memory was not specified. Make a good guess of 33% of physical RAM, or 256 MB
+	if (imageMem <= 0.0) {
+#ifdef _WIN32
+		MEMORYSTATUSEX memData;
+		memData.dwLength = sizeof (memData);
+		GlobalMemoryStatusEx(&memData);
+		//We can't ever allocate more than 2GB, so only use 50% of that
+		imageMem = min(memData.ullTotalPhys * 0.33, ((unsigned long) 1<<31) * 0.50);
+#else
+		imageMem = 256.0 * (1<<20); //256MB
+#endif
+	}
+
+	if (rawintype > 0)
+		cout << "Using at most " << (int) (imageMem / (1<<20)) << "MB of memory for the image\n";
+
+
+	//The raw input field
+	RawField * raw = new RawField(infile, rawintype, seqAccess, findnodata, replaceVal, replaceWith, imageMem);
+	//The importance map, used if a certain area requires a high level of detail
+	RawField * impMap = NULL;
+	if (strlen(importanceMap)) {
+		RawField::intype_t enumInType;
+		//Set the input image type
+		if (!(stricmp(impInType, "TIF") && stricmp(impInType, "TIFF"))) {
+			enumInType = RawField::GEOTIFF;
+		} else if (!(stricmp(impInType, "VICAR") && stricmp(impInType, "VIC"))) {
+			enumInType = RawField::VICAR;
+		} else if (!(stricmp(impInType, "CUBE") && stricmp(impInType, "cub"))) {
+			enumInType = RawField::CUBE;
+		}else if (!(stricmp(impInType, "object") && stricmp(impInType, "obj"))) {
+			enumInType = RawField::OBJ;
+		} else {
+			cout << "Unrecognized input type: " << impInType << "\n";
+		}
+
+		impMap = new RawField(importanceMap, enumInType, seqAccess, false, 0.0, numeric_limits<double>::infinity(), imageMem);
+	}
+
+	if (inserttype != Subdivision::ALL && numPoints >= raw->numPoints) {
+		cout << "Asked to input more points than in the raw field\n";
+		cout << "Simply inserting them all\n";
+		inserttype = Subdivision::ALL;
+	}
+
+	char objName[500];
+	char tifName[500];
+	strcpy(objName, outfile);
+	if (!strstr(outfile, ".obj")) {
+		strcat(objName, ".obj");
+		strcpy(tifName, outfile);
+		strcat(tifName, "_error.tif");
+	} else {
+		strcpy(tifName, outfile);
+		//Replace .obj with .tif
+		strcpy(strstr(tifName, ".obj"), "_error.tif");
+	}
+
+	//Process the -holeBoundary flag
+	//Do this now instead of later so that we have fast failure if the file is not found, or something else goes wrong
+	RawField * boundary;
+	vector<Point3d *> * boundaryPoints = NULL;
+
+	//The acuall mesh we are creating
+	Subdivision mesh(raw, scale, objName, inserttype, impMap);
+
+	if (strlen(holeBoundary)) {
+		boundary = new RawField(holeBoundary, RawField::OBJ);
+		boundaryPoints = new vector<Point3d *>();
+		boundary->getPointsInBox(mesh.getLeft(), mesh.getBottom(), mesh.getRight(), mesh.getTop(), boundaryPoints);
+	}
+
+#ifdef _DEBUG
+		cout << "RawField width " << raw->width << "m RawField height " << raw->height << "m\n";
+#endif
+
+	//make last update negative, so we get a first update
+	clock_t lastUpdate = -1000000;
+
+	if (inserttype != Subdivision::ALL) {
+		if (fixEdge) {
+			if (raw->type > 0) {
+				for (int i = 0; i < raw->width; i++) {
+					mesh.insertSite(i, 0, raw->getZ(i, 0));
+				}
+
+				for (int i = 0; i < raw->width; i++) {
+					mesh.insertSite(i, raw->height - 1, raw->getZ(i, raw->height - 1));
+				}
+
+				for (int i = 0; i < raw->height; i++) {
+					mesh.insertSite(0, i, raw->getZ(0, i));
+				}
+
+				for (int i = 0; i < raw->height; i++) {
+					mesh.insertSite(raw->width - 1, i, raw->getZ(raw->width - 1, i));
+				}
+
+				pointsInserted += 2 * (raw->width - raw->height);
+			} else {
+				cout << "Told to fix edge on a non-raster type\n Ignoring command\n";
+			}
+		}
+
+		int failedInserts = 0;
+		for(int i = pointsInserted; i < numPoints; i++) {
+			clock_t curTime = clock();
+			
+			if ((double) (curTime - lastUpdate) / CLOCKS_PER_SEC > 1) {
+				cout << "Points inserted:" << i << "/" << numPoints << " Time:" 
+					<< (double) (curTime - start) / CLOCKS_PER_SEC /*<< " ReadTime:" << (double) raw->buf->time / CLOCKS_PER_SEC*/ << "\n";
+				lastUpdate = curTime;
+			}
+			if (!mesh.insertBest()) {
+				i--;
+				failedInserts++;
+			} else {
+				failedInserts = 0;
+			}
+
+			if (failedInserts == 100) {
+				cout << "Cannot find more points to insert, returning partial mesh\n";
+				break;
+			}
+		}
+	}
+
+	if (strlen(holeBoundary)) {
+		cout << "Inserting points defining holeBoundary\n";
+		cout << "Note, there should be no points within this boundary\n";
+		for (vector<Point3d *>::iterator it = boundaryPoints->begin(); it != boundaryPoints->end(); ++it) {
+			mesh.insertSite((*it)->getX(), (*it)->getY(), (*it)->getZ());
+		}
+	}
+
+	//Don't clean the mesh of external points if the box is supposed to be preserved
+	if (!preserveBox) {
+		cout << "Deleting external points\n";
+		mesh.clean(forceRemoveCorners);
+	} else {
+		//Smooth out the corners, if necessary, before continuing
+		//This is so that when we make up values when we insert points at slivers, they are close to correct
+		//Smooth the points outside the mesh, so that they look nice
+		//Don't do this if we have been asked to put points outside the mesh at a specific value
+		if (smoothNoDataIters) {
+			cout << "Preliminary smoothing on points outside mesh\n";
+			mesh.smooth(1, smoothNoDataIters, boundaryPoints);
+		}
+	}
+
+	if (maxRho != 0.0) {
+		cout << "Fixing slivers\n";
+		int sliversFixed = mesh.fixSlivers(maxRho, forceSliverFix, boundaryPoints);
+		cout << "Inserted " << sliversFixed << " points to fix slivers\n";
+	}
+
+	//Fix spikes in the mesh
+	if (maxAngle != 90) {
+		cout << "Fixing spikes\n";
+		mesh.removeSpikes(maxAngle, absoluteMaxAngle);
+		cout << "Done fixing spikes. Time: " << (double) (clock() - start) / CLOCKS_PER_SEC << "\n";
+	}
+
+	//Smooth the mesh
+	if (smoothIters) {
+		cout << "Smoothing mesh\n";
+		mesh.smooth(0, smoothIters, boundaryPoints);
+		cout << " Time: " << (double) (clock() - start) / CLOCKS_PER_SEC << "\n";
+	}
+
+	//Smooth the points outside the mesh, so that they look nice
+	//Don't do this if we have been asked to put points outside the mesh at a specific value
+	if (smoothNoDataIters && !prelimSmoothOnly) {
+		cout << "Smoothing points outside of mesh\n";
+		mesh.smooth(1, smoothNoDataIters, boundaryPoints);
+	}
+
+	cout << "Writing ";
+	mesh.printData();
+
+	cout << "Writing points\n";
+	mesh.outputPoints();
+
+	if (writeUV) {
+		cout << "Writing uv map\n";
+		mesh.outputUV();
+	}
+
+	cout << "Writing faces\n";
+	if (strlen(holeBoundary)) {
+		cout << "Leaving out polygons with points only on the input hole boundary\n";
+	}
+	mesh.outputFaces(boundaryPoints, fakeSurface);
+
+	if (outputError) {
+		cout << "Outputing Error\n";
+		WriteError(tifName, &mesh);
+	}
+	cout << "Time: " << (double) (clock() - start) / CLOCKS_PER_SEC << "\n";
+	delete raw;
+}
+
+//Code to test the difference function of subdivision
+//This was intended to eventally be used to automatically allign two meshes, but the difference 
+//metric never quite worked
+
+//int main(int argc, char * argv[]) {
+//	clock_t start = clock();
+//
+//	//clock_t start = clock();
+//	RawField * raw1 = new RawField(argv[1], RawField::GEOTIFF);
+//	RawField * raw2 = new RawField(argv[2], RawField::OBJ);
+//
+//	Subdivision mesh1(raw1, 1, "out.obj", Subdivision::ALL, NULL);
+//	Subdivision mesh2(raw2, 1, "out2.obj", Subdivision::ALL, NULL);
+//
+//	Point2d p1(-2000, -2000);
+//	Point2d p2(-2000, 2000);
+//	Point2d p3(2000, 2000);
+//	Point2d p4(2000, -2000);
+//	Subdivision errors(p1, p2, p3, p4, argv[3]);
+//
+//	mesh1.clean();
+//	mesh2.clean();
+//
+//	mesh1.nnOrderPoints();
+//	mesh2.nnOrderPoints();
+//	cout << "Time: " << (double) (clock() - start) / CLOCKS_PER_SEC << "\n";
+//
+//	double topTen[10][5];
+//
+//	for (int i = 0; i < 10; i++) {
+//		topTen[i][0] = numeric_limits<double>::infinity();
+//	}
+//
+//	double ystart = 80;
+//	double yfinish = 120;
+//	double xstart = 110;
+//	double xfinish = 150;
+//	double systart = 1;
+//	double syfinish = 1;
+//	double dsy = 0.1;
+//
+//	double sxstart = 1;
+//	double sxfinish = 1;
+//	double dsx = 0.1;
+//	//double ystart = -5;
+//	//double yfinish = 5;
+//	//double xstart = -5;
+//	//double xfinish = 5;
+//	double dx = 20;
+//	double dy = 20;
+//	for (double y = ystart; y <= yfinish; y += dy) {
+//		for(double x = xstart; x <= xfinish; x += dx) {
+//			for (double sy = systart; sy <= syfinish; sy += dsy) {
+//				for (double sx = sxstart; sx <= sxfinish; sx += dsx) {
+//
+//				cout << x << " " << -y << "\n";
+//				mesh2.stretch(sx, sy, 1);
+//				mesh2.move(x, y, 0);
+//				double difference = mesh1.difference(mesh2);
+//				for (int i = 0; i < 10; i++) {
+//					if (difference < topTen[i][0]) {
+//						for (int j = 9; j > i; j--) {
+//							topTen[j][0] = topTen[j - 1][0];
+//							topTen[j][1] = topTen[j - 1][1];
+//							topTen[j][2] = topTen[j - 1][2];
+//							topTen[j][3] = topTen[j - 1][3];
+//							topTen[j][4] = topTen[j - 1][4];
+//						}
+//						topTen[i][0] = difference;
+//						topTen[i][1] = x;
+//						topTen[i][2] = y;
+//						topTen[i][3] = sx;
+//						topTen[i][4] = sy;
+//						break;
+//					}
+//				}
+//				//errors.insertSite(x, y, difference);
+//				mesh2.move(-x, -y, 0);
+//				mesh2.stretch(1 / sx, 1 / sy, 1);
+//				}
+//			}
+//		}
+//	}
+//
+//	errors.outputPoints();
+//	errors.outputFaces();
+//
+//	cout << "Top Ten Spots\n";
+//	for (int i = 0; i < 10; i ++) {
+//		cout << "R: " << topTen[i][0] << " x: " << topTen[i][1] << " y: " << -topTen[i][2] << " sx: " << topTen[i][3] << " sy: " << topTen[i][4] << "\n";;
+//	}
+//
+//	cout << "Time: " << (double) (clock() - start) / CLOCKS_PER_SEC << "\n";
+//
+//}

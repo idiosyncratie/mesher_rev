@@ -1,0 +1,73 @@
+#ifndef INCLUSION_QUADTREE_HPP
+#define INCLUSION_QUADTREE_HPP
+
+#include "geom2d.h"
+#include <vector>
+
+
+using std::vector;
+
+class QuadTree {
+public:
+	enum treetype_t {
+		//Constants to represent whether the tree is a node, or a single leaf
+		//containing a particle;
+		NODE = 0,
+		POINT = 1,
+		EMPTY = 2
+	};
+
+	static const int BOTLEFT = 0;
+	static const int TOPLEFT = 1;
+	static const int BOTRIGHT = 2;
+	static const int TOPRIGHT = 3;
+
+	//Create an empty quad-node with specified bottom left and side length
+	//coordinates
+	QuadTree(double botLeftx, double botLefty, double width, double height);
+
+	//Create a quad-node with specified bottom left and top right
+	//coordinates with the given particle
+	QuadTree(double botLeftx, double botLefty, double width, double height, Point2d * point);
+
+	~QuadTree();
+
+	//Functions to return the subdivisions
+
+	//bottom left
+	QuadTree * get00();
+	//top left
+	QuadTree * get01();
+	//bottom right
+	QuadTree * get10();
+	//top right
+	QuadTree * get11();
+
+
+	//Add a particle to the tree
+	void addPoint(Point2d * point);
+
+	//Determine which subdivision the particle is in
+	int findSubdev(Point2d * point);
+
+	//Return all the particles in the quadtree in z-order, allowing an efficient spacial
+	//traversal of all the points
+	void zOrder(vector<Point2d *> * vect);
+	Point2d * getNear(Point2d * point);
+
+	//Get the x or y coordinate of the bottom left corner of the subdevision
+	double getsubx(int subdev);
+	double getsuby(int subdev);
+
+	const double botLeftx;
+	const double botLefty;
+	const double width;
+	const double height;
+	treetype_t type;
+
+	//The subdivisions of this node
+	QuadTree ** subdevs;
+	//The center of mass of this node
+	Point2d * point;
+};
+#endif
